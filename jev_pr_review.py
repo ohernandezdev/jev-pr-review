@@ -464,6 +464,38 @@ def fetch_check_runs(repo: str, sha: str, token: Optional[str]) -> list[dict[str
     return payload.get("check_runs", []) or []
 
 
+def await_ci_status(
+    repo: str,
+    sha: str,
+    token: Optional[str],
+    *,
+    own_run_id: str = "",
+    timeout_s: float = 300.0,
+    poll_s: float = 15.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    now_fn: Callable[[], float] = time.monotonic,
+) -> str:
+    """Wait, bounded, for the other checks on `sha` to settle.
+
+    This job starts at the same time as the repository's other workflows, so a
+    single snapshot usually finds them queued or not yet registered and reports
+    "no checks". Every pull request would then escalate on a race, and the
+    shadow-mode data collected to calibrate thresholds would be worthless.
+
+    Polling only makes the observation honest. It is not how automerge should
+    gate on CI: that belongs to branch protection plus `--auto`, which holds
+    the merge itself instead of trusting one snapshot taken by this process.
+    """
+    if not sha:
+        return "no checks"
+    deadline = now_fn() + timeout_s
+    status = compute_ci_status(fetch_check_runs(repo, sha, token), own_run_id=own_run_id)
+    while status in {"pending", "no checks"} and now_fn() < deadline:
+        sleep_fn(poll_s)
+        status = compute_ci_status(fetch_check_runs(repo, sha, token), own_run_id=own_run_id)
+    return status
+
+
 def usable_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Filter out binary files and files without a text `patch`."""
     return [f for f in files if f.get("patch")]
@@ -692,8 +724,12 @@ def review_pr(
     pr_title = pr.get("title", "")
     pr_body = pr.get("body") or ""
     head_sha = (pr.get("head") or {}).get("sha", "")
-    check_runs = fetch_check_runs(repo, head_sha, github_token) if head_sha else []
-    ci_status = compute_ci_status(check_runs, own_run_id=os.environ.get("GITHUB_RUN_ID", ""))
+    ci_status = await_ci_status(
+        repo,
+        head_sha,
+        github_token,
+        own_run_id=os.environ.get("GITHUB_RUN_ID", ""),
+    )
     has_test_changes = any("test" in f.get("filename", "").lower() for f in files)
     files_changed = [f["filename"] for f in files]
     total_lines_changed = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)

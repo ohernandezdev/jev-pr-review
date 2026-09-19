@@ -52,3 +52,51 @@ def test_only_success_passes_the_hard_gate():
             max_lines=400,
         )
         assert (reasons == []) is green, (status, reasons)
+
+
+def test_await_polls_until_other_checks_settle():
+    """A single snapshot races the other workflows; the wait is what fixes it."""
+    snapshots = [
+        [_run("review", status="in_progress", conclusion=None, run_id="42")],          # only us
+        [_run("review", status="in_progress", conclusion=None, run_id="42"),
+         _run("tests", status="queued", conclusion=None, run_id="7")],                 # tests appear
+        [_run("review", status="in_progress", conclusion=None, run_id="42"),
+         _run("tests", run_id="7")],                                                   # tests pass
+    ]
+    calls = {"n": 0}
+
+    def fake_fetch(repo, sha, token):
+        i = min(calls["n"], len(snapshots) - 1)
+        calls["n"] += 1
+        return snapshots[i]
+
+    original, J.fetch_check_runs = J.fetch_check_runs, fake_fetch
+    try:
+        status = J.await_ci_status("o/r", "abc", None, own_run_id="42",
+                                   sleep_fn=lambda _: None)
+    finally:
+        J.fetch_check_runs = original
+    assert status == "success"
+    assert calls["n"] == 3
+
+
+def test_await_gives_up_at_the_deadline():
+    clock = {"t": 0.0}
+
+    def fake_fetch(repo, sha, token):
+        return [_run("tests", status="queued", conclusion=None, run_id="7")]
+
+    def tick(seconds):
+        clock["t"] += seconds
+
+    original, J.fetch_check_runs = J.fetch_check_runs, fake_fetch
+    try:
+        status = J.await_ci_status("o/r", "abc", None, timeout_s=30.0, poll_s=15.0,
+                                   sleep_fn=tick, now_fn=lambda: clock["t"])
+    finally:
+        J.fetch_check_runs = original
+    assert status == "pending"
+
+
+def test_await_without_a_sha_reports_no_checks():
+    assert J.await_ci_status("o/r", "", None) == "no checks"
