@@ -1,0 +1,24 @@
+# Example config for jev-pr-review. Copy into your repo's root as
+# `.jev-review.yml` (or `.jev-review.json`, see README) and adjust.
+#
+# These starting thresholds are NOT calibrated against real outcome data yet
+# -- they are the spec's launch values. Shadow mode only: nothing merges
+# automatically regardless of these numbers until `mode: enforce` exists.
+
+mode: shadow
+
+automerge_when:
+  max_risk_level: "< 1.5"
+  hidden_scope: "< 0.25"
+  # silent_failure is scaled by that file's risk_level before this check;
+  # raw, a README typo outscores a JWT fix. See derive_dimensions().
+  silent_failure_weighted: "< 0.30"
+  diff_matches_title: "> 0.80"
+  max_lines: 400
+
+blocked_paths:
+  - ".github/**"
+  - "**/auth/**"
+  - "**/migrations/**"
+  - "**/*secret*"
+  - "Dockerfile"

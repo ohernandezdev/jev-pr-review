@@ -1,0 +1,41 @@
+name: 'jev-pr-review'
+description: >-
+  Scores every changed file in a pull request with Jev (TypeSafe System One)
+  and posts a shadow-mode review comment. Reads the diff only; never checks
+  out or executes anything from the PR. Automerge is not implemented yet --
+  this action only comments.
+author: 'jev-pr-review'
+
+inputs:
+  pr-number:
+    description: 'Pull request number to review'
+    required: true
+  config-path:
+    description: 'Path to the jev-pr-review config file'
+    required: false
+    default: '.jev-review.yml'
+  typesafe-api-key:
+    description: 'TypeSafe API key (pass as a secret, e.g. secrets.TYPESAFE_API_KEY)'
+    required: true
+  github-token:
+    description: 'Token used to read the PR and post the review comment'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run jev-pr-review
+      shell: bash
+      env:
+        TYPESAFE_API_KEY: ${{ inputs.typesafe-api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: |
+        python3 "${{ github.action_path }}/jev_pr_review.py" \
+          --pr "${{ inputs.pr-number }}" \
+          --config "${{ inputs.config-path }}"
+
+branding:
+  icon: 'check-circle'
+  color: 'purple'
