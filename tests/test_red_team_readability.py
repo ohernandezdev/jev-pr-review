@@ -350,3 +350,18 @@ def test_the_why_block_and_the_table_agree_on_sensitive_areas():
     readable = body.split("<details>")[0]
     assert "It may touch accounts" in readable
     assert "Not confident either way" in readable
+
+
+def test_only_areas_actually_driving_the_signal_are_named():
+    """Measured on a real PR: personal data peaked at 0.10 and was still named."""
+    _, reasons = J.decide_verdict(
+        aggregated={"risk_level": 1.0, "sensitive_area": 0.71, "touches_accounts": 0.71,
+                    "touches_money": 0.05, "touches_personal_data": 0.10,
+                    "diff_matches_title": 0.95, "hidden_scope": 0.02,
+                    "silent_failure_weighted": 0.05, "worst_case_risk": 0.01},
+        files_changed=["src/a.py"], total_lines_changed=10, ci_status="success",
+        config={"automerge_when": {"sensitive_area": "< 0.10"}, "blocked_paths": []},
+        network_failure=False,
+    )
+    named = [r for r in reasons if r["code"] == "sensitive_area"]
+    assert named and named[0]["areas"] == ["accounts"], named

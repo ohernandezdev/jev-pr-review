@@ -226,6 +226,8 @@ SENSITIVE_AREAS = {
 # table in the first place.
 CERTAIN = 0.90
 CERTAINLY_NOT = 0.10
+# Below this a signal is noise, not something to name in a warning.
+NAMEABLE = 0.50
 
 
 def aggregate_max(per_file_answers: list[dict[str, Any]]) -> dict[str, float]:
@@ -405,10 +407,14 @@ def decide_verdict(
         if dim == "sensitive_area":
             # Name the areas rather than the aggregate: "it touches money" and
             # "it touches personal data" are not the same warning.
+            # Name only the areas actually driving the signal. Listing every
+            # area above 0.10 put "personal data" in a warning when no file
+            # scored over 0.10 on it -- a false alarm in the one line the
+            # reader trusts most.
             areas = [
                 name
                 for key, name in SENSITIVE_AREAS.items()
-                if (aggregated.get(key) or 0.0) > CERTAINLY_NOT
+                if (aggregated.get(key) or 0.0) > NAMEABLE
             ]
             # Only claim it outright when the row does too; below that the row
             # says "not confident either way" and so must this line.
