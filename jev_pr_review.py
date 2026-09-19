@@ -185,11 +185,34 @@ def aggregate_max(per_file_answers: list[dict[str, Any]]) -> dict[str, float]:
             value = answer.get("score", answer.get("noul"))
             if value is not None:
                 per_file[dim] = value
+            if dim == "risk_level":
+                tail = top_level_probability(answer)
+                if tail is not None:
+                    per_file["worst_case_risk"] = tail
         derived = derive_dimensions(per_file)
         for dim, value in derived.items():
             if dim not in result or value > result[dim]:
                 result[dim] = value
     return result
+
+
+def top_level_probability(answer: dict[str, Any]) -> Optional[float]:
+    """P(the highest risk level) from a score answer's distribution.
+
+    The score itself is a probability-weighted mean, so it compensates: a file
+    split 50/50 between "cosmetic" and "logins, payments or data loss" scores
+    exactly 1.5 and slips under a `< 1.5` mean threshold, with half its
+    probability mass saying catastrophe. A mean answers "how bad on average";
+    nothing about automerge is an average question, so the tail gets its own
+    condition.
+    """
+    probabilities = answer.get("probabilities") or {}
+    if not probabilities:
+        # Absent is not zero. A missing distribution leaves the gate without a
+        # value, which escalates, instead of reading as a reassuring 0%.
+        return None
+    top = max(probabilities, key=lambda level: int(level))
+    return float(probabilities[top])
 
 
 def derive_dimensions(per_file: dict[str, float]) -> dict[str, float]:
@@ -233,19 +256,15 @@ def evaluate_hard_gates(
         }
     )
     if matched_blocked:
-        reasons.append(
-            "blocked path(s) touched: " + ", ".join(matched_blocked)
-        )
+        reasons.append({"code": "blocked_path", "paths": matched_blocked})
 
     if total_lines_changed > max_lines:
-        reasons.append(
-            f"changed lines ({total_lines_changed}) exceed max_lines ({max_lines})"
-        )
+        reasons.append({"code": "too_large", "lines": total_lines_changed, "limit": max_lines})
 
     if ci_status == "unreadable":
-        reasons.append("CI state could not be read (check the workflow's `checks: read` permission)")
+        reasons.append({"code": "ci_unreadable"})
     elif ci_status.strip().lower() not in {"all checks passing", "success", "passing"}:
-        reasons.append(f"CI is not green (ci_status={ci_status!r})")
+        reasons.append({"code": "ci_not_green", "status": ci_status})
 
     return reasons
 
@@ -289,7 +308,7 @@ def decide_verdict(
     `automerge`, regardless of everything else.
     """
     if network_failure:
-        return "escalate", ["Jev API unreachable after retries -- fail-safe escalate"]
+        return "escalate", [{"code": "review_unreachable"}]
 
     gate_reasons = evaluate_hard_gates(
         files_changed=files_changed,
@@ -307,6 +326,7 @@ def decide_verdict(
         "risk_level": thresholds.get("max_risk_level"),
         "hidden_scope": thresholds.get("hidden_scope"),
         "silent_failure_weighted": thresholds.get("silent_failure_weighted"),
+        "worst_case_risk": thresholds.get("worst_case_risk"),
         "diff_matches_title": thresholds.get("diff_matches_title"),
     }
     for dim, expr in dimension_thresholds.items():
@@ -314,14 +334,14 @@ def decide_verdict(
             continue
         value = aggregated.get(dim)
         if value is None:
-            reasons.append(f"no score available for {dim}")
+            reasons.append({"code": "no_score", "dimension": dim})
             continue
         if not check_threshold(value, expr):
-            reasons.append(f"{dim}={value:.2f} fails threshold '{expr}'")
+            reasons.append({"code": "dimension", "dimension": dim, "value": value})
 
     if reasons:
         return "escalate", reasons
-    return "automerge", ["all dimensions within configured thresholds, no gate triggered"]
+    return "automerge", [{"code": "all_clear"}]
 
 
 # --- Jev client ---------------------------------------------------------------
@@ -557,37 +577,192 @@ def upsert_comment(repo: str, pr_number: int, token: str, body: str) -> None:
 # --- Comment rendering ---------------------------------------------------------
 
 
+# --- Plain-language rendering --------------------------------------------------
+#
+# The comment is read by whoever is deciding whether to merge, and that person is
+# not always the one who wrote the code. Probabilities are shown as percentages,
+# every dimension is phrased as a question in plain words, and the raw numbers
+# stay available but folded away.
+
+LINE_SEP = chr(10)
+
+QUESTION_TEXT = {
+    "diff_matches_title": "Does the change do what its title says?",
+    "hidden_scope": "Does it also change things its title doesn't mention?",
+    "silent_failure_weighted": "Could a mistake here break things quietly?",
+    "worst_case_risk": "How likely is it that this touches logins, payments or data?",
+    "tests_expected": "Would a reviewer expect tests with this?",
+}
+
+# True when a high percentage is the reassuring answer.
+HIGH_IS_GOOD = {
+    "diff_matches_title": True,
+    "hidden_scope": False,
+    "silent_failure_weighted": False,
+    "worst_case_risk": False,
+    "tests_expected": False,
+}
+
+RISK_BANDS = [
+    (0.5, "None", "cosmetic only: docs, comments, formatting"),
+    (1.5, "Low", "isolated logic, and a mistake shows up immediately"),
+    (2.5, "Medium", "shared logic that several features rely on"),
+    (float("inf"), "High", "logins, payments, migrations or data loss"),
+]
+
+
+def as_percent(value: float) -> str:
+    return f"{round(value * 100)}%"
+
+
+def risk_label(score: float) -> tuple[str, str, str]:
+    """(icon, word, explanation) for a 0..3 risk score."""
+    for ceiling, word, explanation in RISK_BANDS:
+        if score < ceiling:
+            icon = {"None": "🟢", "Low": "🟢", "Medium": "🟠", "High": "🔴"}[word]
+            return icon, word, explanation
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+# A percentage alone reads as "how sure are you of that answer", which is not
+# what it means. The wording carries the direction so the number only has to
+# confirm it.
+ANSWER_BANDS = [
+    (0.10, "Almost certainly not", False),
+    (0.40, "Probably not", False),
+    (0.70, "Unclear", None),
+    (0.90, "Probably yes", True),
+    (1.01, "Almost certainly yes", True),
+]
+
+
+def answer_label(dimension: str, value: float) -> tuple[str, str]:
+    """(icon, wording) for a probability, read in the direction that matters."""
+    for ceiling, wording, says_yes in ANSWER_BANDS:
+        if value < ceiling:
+            break
+    else:  # pragma: no cover
+        raise AssertionError("unreachable")
+
+    if says_yes is None:
+        return "⚠️", wording
+    high_is_good = HIGH_IS_GOOD.get(dimension, True)
+    reassuring = says_yes == high_is_good
+    icon = "✅" if reassuring else "⚠️"
+    return icon, wording
+
+
+def humanize_reason(reason: dict[str, Any]) -> str:
+    """One sentence a non-engineer can act on."""
+    code = reason.get("code")
+    if code == "blocked_path":
+        paths = ", ".join(f"`{p}`" for p in reason["paths"])
+        return f"It changes files that always need a person: {paths}"
+    if code == "too_large":
+        return (
+            f"It is large: {reason['lines']} lines changed, and the limit for "
+            f"merging without a person is {reason['limit']}"
+        )
+    if code == "ci_unreadable":
+        return (
+            "The project's test results could not be read, so nothing is "
+            "assumed to be passing"
+        )
+    if code == "ci_not_green":
+        status = reason.get("status", "")
+        if status == "pending":
+            return "The project's own tests have not finished running yet"
+        if status == "failure":
+            return "The project's own tests are failing"
+        if status == "no checks":
+            return "This project has no automated tests to vouch for the change"
+        return f"The project's own tests are not passing (status: {status})"
+    if code == "review_unreachable":
+        return (
+            "The review service could not be reached, so nothing is assumed "
+            "to be safe"
+        )
+    if code == "no_score":
+        return f"One check did not come back with an answer ({reason['dimension']})"
+    if code == "dimension":
+        dim, value = reason["dimension"], reason["value"]
+        if dim == "risk_level":
+            _, word, explanation = risk_label(value)
+            return f"If this change is wrong the damage is {word.lower()}: {explanation}"
+        question = QUESTION_TEXT.get(dim, dim)
+        return f"{question} -- {as_percent(value)}"
+    if code == "all_clear":
+        return "Every check came back clear"
+    return str(reason)
+
+
 def render_comment(
     *,
     verdict: str,
-    reasons: list[str],
+    reasons: list[dict[str, Any]],
     aggregated: dict[str, float],
     total_input_tokens: int,
+    files_reviewed: int = 0,
 ) -> str:
     cost_usd = total_input_tokens * COST_PER_MILLION_INPUT_TOKENS / 1_000_000
-    lines = [
-        "## jev-pr-review (shadow mode)",
+
+    if verdict == "automerge":
+        headline = "🟢 **This looks safe to merge without a review**"
+    else:
+        headline = "🔴 **Someone should look at this before it is merged**"
+
+    lines = ["## Review summary", "", headline, ""]
+
+    if verdict != "automerge" or reasons:
+        lines.append("**Why**")
+        lines += [f"- {humanize_reason(r)}" for r in reasons]
+        lines.append("")
+
+    lines += [
+        "**What the automatic review found**",
         "",
-        f"**Verdict: `{verdict}`** (shadow mode -- informational only, nothing is merged automatically)",
-        "",
-        "| Dimension | Max score across files |",
+        "| Question | Answer |",
         "|---|---|",
     ]
-    for dim in ("risk_level", "diff_matches_title", "hidden_scope", "silent_failure", "silent_failure_weighted", "tests_expected"):
+
+    risk = aggregated.get("risk_level")
+    if risk is not None:
+        icon, word, explanation = risk_label(risk)
+        lines.append(f"| If this change is wrong, how bad is it? | {icon} **{word}** -- {explanation} |")
+
+    for dim in ("worst_case_risk", "diff_matches_title", "hidden_scope",
+                "silent_failure_weighted", "tests_expected"):
         value = aggregated.get(dim)
-        lines.append(f"| `{dim}` | {value:.2f} |" if value is not None else f"| `{dim}` | n/a |")
+        if value is None:
+            continue
+        icon, word = answer_label(dim, value)
+        lines.append(f"| {QUESTION_TEXT[dim]} | {icon} **{word}** ({as_percent(value)}) |")
 
+    cost_text = "less than a cent" if cost_usd < 0.01 else f"${cost_usd:.2f}"
     lines += [
         "",
-        "**Reasons:**",
+        "Each percentage is how likely the review thinks that answer is -- not a grade for the code.",
+        "Nothing was merged automatically -- this review only leaves a comment.",
+        "",
+        "<details><summary>Raw scores</summary>",
+        "",
+        "| dimension | max across files |",
+        "|---|---|",
     ]
-    lines += [f"- {reason}" for reason in reasons] or ["- (none)"]
-
+    for dim in ("risk_level", "worst_case_risk", "diff_matches_title", "hidden_scope",
+                "silent_failure", "silent_failure_weighted", "tests_expected"):
+        value = aggregated.get(dim)
+        suffix = " / 3" if dim == "risk_level" else ""
+        lines.append(f"| `{dim}` | {value:.2f}{suffix} |" if value is not None else f"| `{dim}` | n/a |")
     lines += [
         "",
-        f"_Cost of this run: ${cost_usd:.6f} ({total_input_tokens} input tokens)._",
+        f"`{total_input_tokens}` input tokens, ${cost_usd:.6f}",
+        "",
+        "</details>",
+        "",
+        f"_{files_reviewed} file{'' if files_reviewed == 1 else 's'} reviewed · cost of this run: {cost_text}._",
     ]
-    return "\n".join(lines)
+    return LINE_SEP.join(lines)
 
 
 # --- Config --------------------------------------------------------------------
@@ -796,6 +971,7 @@ def review_pr(
             reasons=reasons,
             aggregated=aggregated,
             total_input_tokens=total_input_tokens,
+            files_reviewed=len(reviewable),
         )
         upsert_comment(repo, pr_number, github_token, comment_body)
 
@@ -840,7 +1016,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(f"verdict: {verdict}")
     for reason in reasons:
-        print(f"  - {reason}")
+        print(f"  - {humanize_reason(reason)}  {json.dumps(reason)}")
     print(f"scores: {json.dumps(aggregated, indent=2)}")
     print(f"input tokens: {total_input_tokens}")
     return 0

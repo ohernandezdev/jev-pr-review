@@ -191,3 +191,28 @@ required checks pass. This action's job ends at the verdict.
 
 The bounded wait in `await_ci_status` exists only so the shadow-mode data
 records what CI actually did, rather than what was true in the first second.
+
+### The comment is written for whoever decides, not for whoever wrote the code
+
+Probabilities appear as percentages, each dimension is a question in plain
+words, the risk level is a word with its meaning spelled out, and the wording
+carries the direction so the number only confirms it -- "Probably not (32%)"
+rather than "No -- 0.32". The raw scores stay in a folded `<details>` block for
+whoever wants them.
+
+### Why the mean risk is not enough
+
+`risk_level` is a probability-weighted mean over the levels, so it compensates.
+A file split 50/50 between "cosmetic" and "logins, payments or data loss"
+scores exactly 1.5 and slips under a `< 1.5` threshold with half its
+probability mass on catastrophe. Measured distributions behind real scores:
+
+| diff | score | distribution |
+|---|---|---|
+| add retry/backoff | 1.85 | 15% level 1, 85% level 2 |
+| `jwt.decode` -> `jwt.verify` | 3.00 | 100% level 3 |
+
+So `worst_case_risk` -- the probability mass on the worst level -- gets its own
+threshold. A mean answers "how bad on average", and nothing about merging
+without a person is an average question. A missing distribution is absent, not
+zero: the gate then has no value and escalates.

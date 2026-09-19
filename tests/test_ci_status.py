@@ -123,7 +123,8 @@ def test_unreadable_blocks_with_an_actionable_reason():
         blocked_paths=[],
         max_lines=400,
     )
-    assert any("checks: read" in r for r in reasons), reasons
+    assert any(r["code"] == "ci_unreadable" for r in reasons), reasons
+    assert "could not be read" in J.humanize_reason(reasons[0])
 
 
 def test_fetch_check_runs_calls_github_correctly():

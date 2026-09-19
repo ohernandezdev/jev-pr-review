@@ -13,6 +13,9 @@ automerge_when:
   # silent_failure is scaled by that file's risk_level before this check;
   # raw, a README typo outscores a JWT fix. See derive_dimensions().
   silent_failure_weighted: "< 0.30"
+  # The mean compensates: 50% cosmetic + 50% auth also scores 1.5. This gates
+  # the tail directly -- how much probability sits on the worst level.
+  worst_case_risk: "< 0.15"
   diff_matches_title: "> 0.80"
   max_lines: 400
 

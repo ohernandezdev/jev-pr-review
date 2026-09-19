@@ -174,3 +174,25 @@ sirve para que los datos de calibración sean honestos.
 **Estado final de PR #1:** veredicto `escalate`, única razón `blocked path(s) touched:
 .github/workflows/*`. Correcto: el PR toca workflows, que están en la lista negra. El
 gate de CI ya lee verde. Coste del run: $0.000422.
+
+## Legibilidad y cola de la distribución (2026-09-19, tras feedback de Omar)
+
+**Comentario para no-técnicos.** Porcentajes en vez de 0.95, cada dimensión como
+pregunta en lenguaje llano, el riesgo como palabra con su significado escrito, y el
+fraseo llevando la dirección para que el número solo confirme ("Probably not (32%)",
+no "No -- 0.32"). Los números crudos quedan en un `<details>` plegado. Razones
+estructuradas (`{"code": ..., ...}`) en vez de cadenas: la lógica es de máquina y el
+texto es presentación.
+
+**Pregunta de Omar: "1,76 de risk level es rarísimo, ¿no?"** No: un `score` es la
+posición esperada sobre los niveles, no una etiqueta. Medido en vivo:
+retry/backoff 1.85 = `{1: 0.15, 2: 0.85}`; auth jwt 3.00 = `{3: 1.0}`.
+
+Pero la pregunta destapó un fallo real del umbral: **la media compensa.** Un fichero
+50% cosmético / 50% auth da exactamente 1.5 y colaba bajo `< 1.5` con la mitad de la
+masa en catástrofe. Las propias docs de TypeSafe avisan de que una regla de "cualquier
+violación grave" necesita condición aparte. Añadido `worst_case_risk` (masa de
+probabilidad en el peor nivel, umbral `< 0.15`), que además usa las `probabilities`
+que estábamos tirando. Distribución ausente ≠ 0: sin dato, el gate escala.
+
+68 tests en verde.

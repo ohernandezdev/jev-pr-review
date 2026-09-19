@@ -124,8 +124,8 @@ def test_readme_verdict_is_more_permissive_than_auth_verdict():
     # hold is that the auth diff is blocked by a DANGER dimension (risk or
     # hidden scope) while the README diff never is.
     danger_dims = {"risk_level", "hidden_scope"}
-    auth_danger_reasons = [r for r in auth_reasons if any(d in r for d in danger_dims)]
-    readme_danger_reasons = [r for r in readme_reasons if any(d in r for d in danger_dims)]
+    auth_danger_reasons = [r for r in auth_reasons if r.get("dimension") in danger_dims]
+    readme_danger_reasons = [r for r in readme_reasons if r.get("dimension") in danger_dims]
 
     assert auth_danger_reasons, f"expected auth diff to be blocked by a danger dimension, reasons: {auth_reasons}"
     assert not readme_danger_reasons, (

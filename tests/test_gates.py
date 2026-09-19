@@ -17,7 +17,7 @@ def test_blocked_path_gate_fires():
         blocked_paths=["**/auth/**"],
         max_lines=400,
     )
-    assert any("blocked path" in r for r in reasons)
+    assert any(r["code"] == "blocked_path" for r in reasons)
 
 
 def test_max_lines_gate_fires():
@@ -28,7 +28,7 @@ def test_max_lines_gate_fires():
         blocked_paths=[],
         max_lines=400,
     )
-    assert any("max_lines" in r for r in reasons)
+    assert any(r["code"] == "too_large" for r in reasons)
 
 
 def test_ci_not_green_gate_fires():
@@ -39,7 +39,7 @@ def test_ci_not_green_gate_fires():
         blocked_paths=[],
         max_lines=400,
     )
-    assert any("CI is not green" in r for r in reasons)
+    assert any(r["code"] == "ci_not_green" for r in reasons)
 
 
 def test_no_gate_fires_on_clean_pr():
@@ -61,7 +61,7 @@ def test_gates_use_fnmatch_glob_semantics():
         blocked_paths=["Dockerfile"],
         max_lines=400,
     )
-    assert any("Dockerfile" in r for r in reasons)
+    assert any("Dockerfile" in p for r in reasons for p in r.get("paths", []))
 
 
 @pytest.mark.parametrize(
@@ -94,7 +94,7 @@ def test_decide_verdict_network_failure_is_always_escalate_never_automerge():
         network_failure=True,
     )
     assert verdict == "escalate"
-    assert any("Jev API unreachable" in r for r in reasons)
+    assert any(r["code"] == "review_unreachable" for r in reasons)
 
 
 def test_decide_verdict_hard_gate_beats_perfect_scores():
@@ -106,7 +106,7 @@ def test_decide_verdict_hard_gate_beats_perfect_scores():
         config=DEFAULT_CONFIG,
     )
     assert verdict == "escalate"
-    assert any("blocked path" in r for r in reasons)
+    assert any(r["code"] == "blocked_path" for r in reasons)
 
 
 def test_decide_verdict_automerge_when_everything_clean():
@@ -130,4 +130,4 @@ def test_decide_verdict_escalates_on_high_risk_even_without_gates():
         config=DEFAULT_CONFIG,
     )
     assert verdict == "escalate"
-    assert any("risk_level" in r for r in reasons)
+    assert any(r.get("dimension") == "risk_level" for r in reasons)
