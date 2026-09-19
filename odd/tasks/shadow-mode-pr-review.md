@@ -74,7 +74,7 @@ el diff por la API de GitHub. Permisos mínimos: `pull-requests: write`, `conten
 - [x] T2 `action.yml` + `.jev-review.yml` de ejemplo + README
 - [x] T3 Tests: unitarios de agregación/gates con fixtures, y un E2E real contra la API que verifique que un diff de auth puntúa alto y uno de README puntúa bajo
 - [x] T4 Workflow consumidor en jevmod (`.github/workflows/jev-review.yml`), modo sombra
-- [x] T5 Correr el E2E, abrir un PR de prueba en jevmod y mirar el comentario real
+- [x] T5 Correr el E2E, publicar el repo y abrir un PR real (dogfooding sobre sí mismo)
 
 ## Criterio de aceptación
 
@@ -122,7 +122,6 @@ recibe un comentario con las cinco dimensiones y el veredicto, y no mergea nada.
 
 ## Siguiente paso
 
-T4 (workflow consumidor en jevmod) y T5 (PR de prueba real) — fuera del alcance de
 esta sesión, las hace Omar.
 
 ## Corrección tras medir (2026-09-19)
@@ -147,17 +146,31 @@ acabó llevando también el fix de CI y un workflow nuevo. `hidden_scope` subió
 detectó que el diff hacía bastante más de lo que anunciaba el título. No se lo
 enseñé, salió solo.
 
-**Defecto propio, en dos capas.** El veredicto escaló por `ci_status`, no por
-las dimensiones:
-1. Usaba `mergeable_state`, que valía `unstable` porque el propio revisor era un
-   check en marcha. Se bloqueaba a sí mismo por existir. Ahora lee los check-runs
-   del head SHA y descarta el suyo por `GITHUB_RUN_ID`.
-2. Arreglado eso, arrancaba a la vez que los demás workflows y veía `no checks`
-   por carrera. Espera acotada de 5 min.
+**Defectos propios, tres, en cascada.** El veredicto escalaba por `ci_status`, nunca
+por las dimensiones:
 
-La conclusión de diseño: **el revisor no debe ser quien decide que el CI está
-verde.** En `enforce` el merge irá por `gh pr merge --auto` y el gate de CI por
-branch protection, que retiene el merge de verdad en vez de fiarse de una foto.
-La espera solo sirve para que los datos de calibración sean honestos.
+1. Usaba `mergeable_state`, que valía `unstable` porque el propio revisor era un check
+   en marcha. Se bloqueaba a sí mismo por existir. Ahora lee los check-runs del head SHA
+   y descarta el suyo por `GITHUB_RUN_ID`.
+2. Arreglado eso, arrancaba a la vez que los demás workflows y veía `no checks` por
+   carrera. Espera acotada de 5 min.
+3. Seguía sin leerlos. Diagnostiqué "faltan permisos" y añadí `checks: read` — la
+   conclusión era falsa. `fetch_check_runs` llamaba a `_github_request` con una ruta
+   relativa y el token posicional, cuando la función pide URL completa y token
+   keyword-only. El `TypeError` caía en un `except Exception` que lo convertía en
+   "no se pudo leer el CI, concede `checks: read`". Un bug de argumentos disfrazado de
+   problema de permisos, y el mensaje de error que yo mismo había escrito mandó el
+   diagnóstico en la dirección equivocada. Ahora solo se capturan errores de transporte.
 
-Coste real observado: $0.000047 y $0.000225 por run.
+La lección: **un `except` ancho con un mensaje que adivina la causa es peor que no
+capturar nada.** Convierte un fallo de programación en un consejo confiado y falso.
+
+**Conclusión de diseño.** El revisor no debe ser quien decide que el CI está verde:
+es un check más, arranca a la vez que los demás y cualquier foto que saque es una
+carrera que puede perder. En `enforce` el merge irá por `gh pr merge --auto` y el gate
+de CI por branch protection, que retiene el merge de verdad. La espera acotada solo
+sirve para que los datos de calibración sean honestos.
+
+**Estado final de PR #1:** veredicto `escalate`, única razón `blocked path(s) touched:
+.github/workflows/*`. Correcto: el PR toca workflows, que están en la lista negra. El
+gate de CI ya lee verde. Coste del run: $0.000422.
