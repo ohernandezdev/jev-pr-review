@@ -429,6 +429,41 @@ def fetch_pr_files(repo: str, pr_number: int, token: str) -> list[dict[str, Any]
     return files
 
 
+def compute_ci_status(check_runs: list[dict[str, Any]], *, own_run_id: str = "") -> str:
+    """Derive a CI verdict from a commit's check runs, ignoring our own.
+
+    `mergeable_state` cannot be used here: this reviewer is itself a check on
+    the pull request, so while it runs the state is `unstable` and it would
+    never observe a green CI -- it would block every pull request on its own
+    existence. A run whose URL carries `own_run_id` is therefore dropped.
+
+    Returns "success", "pending", "failure", or "no checks". A repository with
+    no other checks is not green: nothing has vouched for the change.
+    """
+    others = [
+        run
+        for run in check_runs
+        if not (own_run_id and f"/runs/{own_run_id}/" in (run.get("html_url") or ""))
+    ]
+    if not others:
+        return "no checks"
+    if any(run.get("status") != "completed" for run in others):
+        return "pending"
+    ok = {"success", "neutral", "skipped"}
+    if any((run.get("conclusion") or "") not in ok for run in others):
+        return "failure"
+    return "success"
+
+
+def fetch_check_runs(repo: str, sha: str, token: Optional[str]) -> list[dict[str, Any]]:
+    """Check runs for a commit. An unreadable list is treated as no checks."""
+    try:
+        payload = _github_request(f"/repos/{repo}/commits/{sha}/check-runs", token)
+    except Exception:
+        return []
+    return payload.get("check_runs", []) or []
+
+
 def usable_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Filter out binary files and files without a text `patch`."""
     return [f for f in files if f.get("patch")]
@@ -656,7 +691,9 @@ def review_pr(
 
     pr_title = pr.get("title", "")
     pr_body = pr.get("body") or ""
-    ci_status = pr.get("mergeable_state") or "unknown"
+    head_sha = (pr.get("head") or {}).get("sha", "")
+    check_runs = fetch_check_runs(repo, head_sha, github_token) if head_sha else []
+    ci_status = compute_ci_status(check_runs, own_run_id=os.environ.get("GITHUB_RUN_ID", ""))
     has_test_changes = any("test" in f.get("filename", "").lower() for f in files)
     files_changed = [f["filename"] for f in files]
     total_lines_changed = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
