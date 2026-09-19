@@ -243,7 +243,7 @@ def evaluate_hard_gates(
         )
 
     if ci_status == "unreadable":
-        reasons.append("CI state could not be read -- grant the workflow `checks: read`")
+        reasons.append("CI state could not be read (check the workflow's `checks: read` permission)")
     elif ci_status.strip().lower() not in {"all checks passing", "success", "passing"}:
         reasons.append(f"CI is not green (ci_status={ci_status!r})")
 
@@ -469,14 +469,15 @@ def fetch_check_runs(repo: str, sha: str, token: Optional[str]) -> list[dict[str
     which looks exactly like a repository that has no CI. The caller has to be
     able to tell those apart, so the failure is raised.
     """
+    url = f"https://api.github.com/repos/{repo}/commits/{sha}/check-runs?per_page=100"
     try:
-        payload = _github_request(f"/repos/{repo}/commits/{sha}/check-runs", token)
-    except Exception as exc:
-        raise CheckRunsUnreadable(
-            f"cannot read check runs for {sha[:7]} ({exc}) -- "
-            "the workflow may be missing `checks: read` permission"
-        ) from exc
-    return payload.get("check_runs", []) or []
+        payload = _github_request(url, token=token)
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        # Only transport failures are caught. A TypeError here once masqueraded
+        # as a permissions problem for a whole debugging session, so anything
+        # that is not the network is left to crash loudly.
+        raise CheckRunsUnreadable(f"cannot read check runs for {sha[:7]}: {exc}") from exc
+    return (payload or {}).get("check_runs", []) or []
 
 
 def await_ci_status(

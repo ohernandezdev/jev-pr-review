@@ -124,3 +124,40 @@ def test_unreadable_blocks_with_an_actionable_reason():
         max_lines=400,
     )
     assert any("checks: read" in r for r in reasons), reasons
+
+
+def test_fetch_check_runs_calls_github_correctly():
+    """Regression: the call passed a relative path and a positional token.
+
+    That raised TypeError, a broad except turned it into 'unreadable', and the
+    reviewer confidently blamed a missing permission for an hour.
+    """
+    seen = {}
+
+    def fake_request(url, *, token, method="GET", body=None):
+        seen["url"] = url
+        seen["token"] = token
+        return {"check_runs": [_run("tests")]}
+
+    original, J._github_request = J._github_request, fake_request
+    try:
+        runs = J.fetch_check_runs("o/r", "abc123", "tok")
+    finally:
+        J._github_request = original
+
+    assert seen["url"].startswith("https://api.github.com/repos/o/r/commits/abc123/check-runs")
+    assert seen["token"] == "tok"
+    assert len(runs) == 1
+
+
+def test_fetch_check_runs_does_not_swallow_programming_errors():
+    def boom(url, *, token, method="GET", body=None):
+        raise TypeError("wrong arguments")
+
+    original, J._github_request = J._github_request, boom
+    try:
+        import pytest as _pytest
+        with _pytest.raises(TypeError):
+            J.fetch_check_runs("o/r", "abc", "tok")
+    finally:
+        J._github_request = original
