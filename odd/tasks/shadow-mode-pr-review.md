@@ -74,7 +74,7 @@ el diff por la API de GitHub. Permisos mínimos: `pull-requests: write`, `conten
 - [x] T2 `action.yml` + `.jev-review.yml` de ejemplo + README
 - [x] T3 Tests: unitarios de agregación/gates con fixtures, y un E2E real contra la API que verifique que un diff de auth puntúa alto y uno de README puntúa bajo
 - [x] T4 Workflow consumidor en jevmod (`.github/workflows/jev-review.yml`), modo sombra
-- [ ] T5 Correr el E2E, abrir un PR de prueba en jevmod y mirar el comentario real
+- [x] T5 Correr el E2E, publicar el repo y abrir un PR real (dogfooding sobre sí mismo)
 
 ## Criterio de aceptación
 
@@ -122,7 +122,6 @@ recibe un comentario con las cinco dimensiones y el veredicto, y no mergea nada.
 
 ## Siguiente paso
 
-T4 (workflow consumidor en jevmod) y T5 (PR de prueba real) — fuera del alcance de
 esta sesión, las hace Omar.
 
 ## Corrección tras medir (2026-09-19)
@@ -136,3 +135,133 @@ del max entre ficheros, y el orden queda: README 0.00 < auth 0.20 < retry 0.44 <
 Los 32 tests iniciales pasaban sin cubrir esto: al quitar la clave de sus configs, el
 código la saltaba en silencio. Añadidos 5 tests (`tests/test_weighted_silent_failure.py`),
 uno de ellos E2E real. **37 passed.**
+
+## Lo que encontró el primer PR real (2026-09-19)
+
+PR #1 de `jev-pr-review`, dogfooding sobre sí mismo. Dos hallazgos:
+
+**Acierto del modelo.** El PR se tituló `docs: use the real action reference` y
+acabó llevando también el fix de CI y un workflow nuevo. `hidden_scope` subió a
+**0.96** y `tests_expected` a 0.80. La dimensión hace exactamente lo que promete:
+detectó que el diff hacía bastante más de lo que anunciaba el título. No se lo
+enseñé, salió solo.
+
+**Defectos propios, tres, en cascada.** El veredicto escalaba por `ci_status`, nunca
+por las dimensiones:
+
+1. Usaba `mergeable_state`, que valía `unstable` porque el propio revisor era un check
+   en marcha. Se bloqueaba a sí mismo por existir. Ahora lee los check-runs del head SHA
+   y descarta el suyo por `GITHUB_RUN_ID`.
+2. Arreglado eso, arrancaba a la vez que los demás workflows y veía `no checks` por
+   carrera. Espera acotada de 5 min.
+3. Seguía sin leerlos. Diagnostiqué "faltan permisos" y añadí `checks: read` — la
+   conclusión era falsa. `fetch_check_runs` llamaba a `_github_request` con una ruta
+   relativa y el token posicional, cuando la función pide URL completa y token
+   keyword-only. El `TypeError` caía en un `except Exception` que lo convertía en
+   "no se pudo leer el CI, concede `checks: read`". Un bug de argumentos disfrazado de
+   problema de permisos, y el mensaje de error que yo mismo había escrito mandó el
+   diagnóstico en la dirección equivocada. Ahora solo se capturan errores de transporte.
+
+La lección: **un `except` ancho con un mensaje que adivina la causa es peor que no
+capturar nada.** Convierte un fallo de programación en un consejo confiado y falso.
+
+**Conclusión de diseño.** El revisor no debe ser quien decide que el CI está verde:
+es un check más, arranca a la vez que los demás y cualquier foto que saque es una
+carrera que puede perder. En `enforce` el merge irá por `gh pr merge --auto` y el gate
+de CI por branch protection, que retiene el merge de verdad. La espera acotada solo
+sirve para que los datos de calibración sean honestos.
+
+**Estado final de PR #1:** veredicto `escalate`, única razón `blocked path(s) touched:
+.github/workflows/*`. Correcto: el PR toca workflows, que están en la lista negra. El
+gate de CI ya lee verde. Coste del run: $0.000422.
+
+## Legibilidad y cola de la distribución (2026-09-19, tras feedback de Omar)
+
+**Comentario para no-técnicos.** Porcentajes en vez de 0.95, cada dimensión como
+pregunta en lenguaje llano, el riesgo como palabra con su significado escrito, y el
+fraseo llevando la dirección para que el número solo confirme ("Probably not (32%)",
+no "No -- 0.32"). Los números crudos quedan en un `<details>` plegado. Razones
+estructuradas (`{"code": ..., ...}`) en vez de cadenas: la lógica es de máquina y el
+texto es presentación.
+
+**Pregunta de Omar: "1,76 de risk level es rarísimo, ¿no?"** No: un `score` es la
+posición esperada sobre los niveles, no una etiqueta. Medido en vivo:
+retry/backoff 1.85 = `{1: 0.15, 2: 0.85}`; auth jwt 3.00 = `{3: 1.0}`.
+
+Pero la pregunta destapó un fallo real del umbral: **la media compensa.** Un fichero
+50% cosmético / 50% auth da exactamente 1.5 y colaba bajo `< 1.5` con la mitad de la
+masa en catástrofe. Las propias docs de TypeSafe avisan de que una regla de "cualquier
+violación grave" necesita condición aparte. Añadido `worst_case_risk` (masa de
+probabilidad en el peor nivel, umbral `< 0.15`), que además usa las `probabilities`
+que estábamos tirando. Distribución ausente ≠ 0: sin dato, el gate escala.
+
+68 tests en verde.
+
+## Red-team con lectora no técnica
+
+El comentario se pasó por una lectora que no es ingeniera (jefa de operaciones), la
+persona a la que de verdad se le pediría firmar. Ocho hallazgos, todos aceptados
+salvo uno.
+
+1. **La tabla no participaba en el veredicto.** `decide_verdict` hacía
+   `if gate_reasons: return "escalate", gate_reasons`, así que al saltar un gate duro
+   las dimensiones no se evaluaban nunca — pero la tabla se pintaba igual. Su frase:
+   "me está entrenando a ignorar la tabla; el color solo depende del tamaño y del
+   nombre del fichero". El más grave de los ocho. Ahora gates y dimensiones se evalúan
+   SIEMPRE y se devuelven todas las razones juntas. Test:
+   `test_a_hard_gate_does_not_hide_the_dimensions_that_also_failed` y
+   `test_a_red_verdict_can_be_driven_by_the_table_alone`.
+2. **El tick verde sobre un 38%.** `✅ Probably not (38%)` es indefendible. Tres
+   bandas y nada más: `<0.10` → `No`, `0.10–0.90` → `Not confident either way`,
+   `>0.90` → `Yes`. El ✅ exige dirección tranquilizadora Y certeza, así que nada de
+   la banda media lleva visto bueno. Fuera "Probably yes/not": el encogimiento de
+   hombros tiene que verse como tal.
+3. **Dos filas para una sola pregunta.** `Does the change do what its title says?` y
+   `Does it also change things its title doesn't mention?` se leían como la misma
+   pregunta repetida. Fusionadas en *Does the title describe the whole change?*. Las
+   dos dimensiones se siguen preguntando a Jev, siguen en los raw scores y siguen
+   teniendo umbral propio: lo que cambió es solo la presentación. Además, cuando la
+   respuesta es `No -- it changes more than it says` ese hallazgo sube a la PRIMERA
+   línea de **Why** (razón `changes_more_than_title`): era el más grave del comentario
+   y estaba enterrado en la fila 4.
+4. **Preguntábamos una opinión teniendo el hecho.** `Would a reviewer expect tests
+   with this?` es una expectativa; ella: "dime si hay tests o no hay". Y
+   `has_test_changes` ya existía en `review_pr`. La fila pasa a *Does it include
+   tests?* → `Yes`/`No` alimentada por ese booleano. `tests_expected` se mantiene en
+   los raw scores y solo matiza: `> 0.90` sin tests → `No -- and a reviewer would
+   expect them`, y esa combinación entra como razón en "Why".
+5. **Tres riesgos distintos en un porcentaje agregado.** "que toque el login no es lo
+   mismo que toque pagos, ni que toque datos personales; si no es un no rotundo quiero
+   saber CUÁL". Tres preguntas `noul` nuevas — `touches_money`, `touches_accounts`,
+   `touches_personal_data` — redactadas describiendo la situación, nunca la decisión.
+   Agregadas por `max`, y su máximo es `sensitive_area`, con gate `< 0.10` en
+   `.jev-review.yml`. La fila nombra las que aplican: `Yes -- money, personal data`.
+6. **"No firmo lo que no sé qué es".** Ambos comentarios, incluido el verde, llevan
+   bajo el titular título del PR, autor (`user.login`), ficheros y líneas cambiadas,
+   sacados de la respuesta de la API que ya pedíamos. Si no hay dato, no se inventa.
+7. **Un aviso sin destinatario no ocurre.** Config opcional `escalate_to`; si está, el
+   titular rojo acaba en ` -- assigned to: @quien`. Si no está, no se inventa a nadie,
+   y el titular verde nunca lo lleva.
+8. **El coste.** "Me sugiere que esto es barato y por tanto flojo". `cost of this run`
+   se movió dentro del `<details>` plegado; fuera queda solo el recuento de ficheros.
+
+**Lo que NO se cambió: los porcentajes.** Ella quería quitarlos; se quedan por
+decisión explícita del dueño del repo. Etiqueta + `(NN%)`.
+
+**Lección transversal:** el red-team que sirve no es el que busca bugs en el código,
+es el que lee la salida como la leería quien tiene que actuar. Un tick verde sobre un
+38% y una tabla decorativa pasan cualquier test unitario y destruyen la confianza en
+la herramienta a la primera lectura.
+
+96 tests en verde (68 anteriores + 28 nuevos de `tests/test_red_team_readability.py`).
+
+### Dos correcciones sobre el trabajo del red-team
+
+- **`worst_case_risk` dejó de ser fila.** "How bad is it" y "how likely is the worst case"
+  se leían como la misma pregunta dos veces: el pecado que el propio red-team señaló en
+  las filas del título, reintroducido al arreglarlas. Sigue siendo gate y raw score.
+- **Un código de razón sin frase pintaba el diccionario crudo** en un comentario que lee
+  una persona. Ahora hay un texto de reserva honesto y un test que lee el propio fuente
+  del módulo y exige una frase para cada código que se genera en él.
+
+99 tests en verde.

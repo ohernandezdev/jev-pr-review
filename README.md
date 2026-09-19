@@ -15,7 +15,7 @@ This is a self-contained composite action with zero non-stdlib dependencies
 ## Use it in any repo
 
 ```yaml
-- uses: <owner>/jev-pr-review@v1
+- uses: ohernandezdev/jev-pr-review@v1
   with:
     pr-number: ${{ github.event.pull_request.number }}
     typesafe-api-key: ${{ secrets.TYPESAFE_API_KEY }}
@@ -30,14 +30,15 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  pull-requests: write
   contents: read
+  checks: read
+  pull-requests: write
 
 jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: <owner>/jev-pr-review@v1
+      - uses: ohernandezdev/jev-pr-review@v1
         with:
           pr-number: ${{ github.event.pull_request.number }}
           typesafe-api-key: ${{ secrets.TYPESAFE_API_KEY }}
@@ -63,6 +64,10 @@ from being diluted by 39 trivial ones.
 | `diff_matches_title` | noul | the change does what the PR title promises |
 | `hidden_scope` | noul | the change does something ADDITIONAL beyond what the title says |
 | `silent_failure` | noul | a mistake here would fail silently, not loudly |
+| `touches_money` | noul | charges, payments, refunds, invoicing, pricing, balances |
+| `touches_accounts` | noul | sign-in, passwords, tokens, permissions, visibility |
+| `touches_personal_data` | noul | storage, export, deletion or exposure of personal data |
+| `sensitive_area` | derived | the max of the three `touches_*` questions |
 | `silent_failure_weighted` | derived | `silent_failure` scaled by that file's `risk_level` |
 | `tests_expected` | noul | a competent reviewer would expect tests with this change |
 
@@ -71,12 +76,18 @@ from being diluted by 39 trivial ones.
 Aggregation is `max` across files per dimension -- never an average, so one
 dangerous file can't hide behind many trivial ones.
 
-Hard gates run **before** any score is consulted. Any one of them forces
-`escalate` regardless of the scores:
+Hard gates and scored dimensions are **both always evaluated**, and all their
+reasons are reported together. Any single failure forces `escalate`:
 
 - a changed file matches `blocked_paths` (fnmatch)
 - total changed lines (added + deleted) exceed `max_lines`
 - CI is not green
+- any dimension threshold in `automerge_when` is not met
+
+Gates used to short-circuit and return before the dimensions were scored. The
+table was then printed anyway, so the verdict's colour depended only on file
+size and file name while the scores appeared to explain it. A reader who
+notices that learns to ignore the table.
 
 Jev API failures after retries are also fail-safe: they force `escalate`,
 never `automerge`.
@@ -179,3 +190,71 @@ so it is scaled by that file's `risk_level` before any threshold sees it:
 
 The pairing happens per file, before the max across files -- otherwise the README's
 silence would pair with the auth file's risk.
+
+### When enforce mode arrives, it will not merge by itself
+
+The reviewer produces a semantic verdict. It should never be the thing that
+decides CI was green: it is one check among others, it starts alongside them,
+and any snapshot it takes is a race it can lose. The CI gate belongs to branch
+protection, and the merge to `gh pr merge --auto`, which GitHub holds until the
+required checks pass. This action's job ends at the verdict.
+
+The bounded wait in `await_ci_status` exists only so the shadow-mode data
+records what CI actually did, rather than what was true in the first second.
+
+### The comment is written for whoever decides, not for whoever wrote the code
+
+Probabilities appear as percentages, each dimension is a question in plain
+words, the risk level is a word with its meaning spelled out, and the wording
+carries the direction so the number only confirms it. The raw scores stay in a
+folded `<details>` block for whoever wants them.
+
+The comment was then red-teamed by a non-technical reader -- an operations
+lead, the person who would actually be asked to sign off. What that changed:
+
+- **The table participates in the verdict.** See "Aggregation and gates" above.
+- **Three answer bands, and the middle one says so.** Below 10% is `No`, above
+  90% is `Yes`, and everything between is `Not confident either way`. A green
+  tick needs both a reassuring direction *and* certainty, so nothing in the
+  middle band is ever ticked. `Probably not (38%)` beside a tick was reading as
+  an all-clear; a shrug has to look like a shrug.
+- **One question about the title, not two.** "Does it do what the title says?"
+  and "Does it also change things the title doesn't mention?" read as the same
+  question asked twice, so they render as one row: *Does the title describe the
+  whole change?* Both dimensions are still asked of Jev, still kept in the raw
+  scores, and still have their own thresholds. When the answer is
+  `No -- it changes more than it says`, that finding is promoted to the first
+  line of **Why** instead of sitting in table-row order.
+- **Tests are a fact, not an opinion.** The row is *Does it include tests?*,
+  answered from `has_test_changes`, which we already compute. `tests_expected`
+  only qualifies the no: `No -- and a reviewer would expect them`.
+- **Money, accounts and personal data are three questions.** One aggregate
+  number hid which kind of trouble it was. They are asked separately, gated on
+  their max (`sensitive_area`), and the row names the ones that fired.
+- **The comment says which PR it is.** Title, author, files and lines changed
+  sit under the headline of both the red and the green comment -- nobody can
+  sign off on a change they cannot identify.
+- **An escalation can name an owner.** Optional `escalate_to` appends
+  ` -- assigned to: @who` to the red headline. Unset, nothing is invented.
+- **The cost moved inside the fold.** A cost quoted next to the verdict reads
+  as "this was cheap, therefore it was shallow". Outside stays the file count.
+
+The percentages themselves stay: they were the one thing the red-team wanted
+removed, and they are deliberately kept.
+
+### Why the mean risk is not enough
+
+`risk_level` is a probability-weighted mean over the levels, so it compensates.
+A file split 50/50 between "cosmetic" and "logins, payments or data loss"
+scores exactly 1.5 and slips under a `< 1.5` threshold with half its
+probability mass on catastrophe. Measured distributions behind real scores:
+
+| diff | score | distribution |
+|---|---|---|
+| add retry/backoff | 1.85 | 15% level 1, 85% level 2 |
+| `jwt.decode` -> `jwt.verify` | 3.00 | 100% level 3 |
+
+So `worst_case_risk` -- the probability mass on the worst level -- gets its own
+threshold. A mean answers "how bad on average", and nothing about merging
+without a person is an average question. A missing distribution is absent, not
+zero: the gate then has no value and escalates.
