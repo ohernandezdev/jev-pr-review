@@ -15,7 +15,7 @@ This is a self-contained composite action with zero non-stdlib dependencies
 ## Use it in any repo
 
 ```yaml
-- uses: <owner>/jev-pr-review@v1
+- uses: ohernandezdev/jev-pr-review@v1
   with:
     pr-number: ${{ github.event.pull_request.number }}
     typesafe-api-key: ${{ secrets.TYPESAFE_API_KEY }}
@@ -37,7 +37,7 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: <owner>/jev-pr-review@v1
+      - uses: ohernandezdev/jev-pr-review@v1
         with:
           pr-number: ${{ github.event.pull_request.number }}
           typesafe-api-key: ${{ secrets.TYPESAFE_API_KEY }}
