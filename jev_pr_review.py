@@ -410,7 +410,14 @@ def decide_verdict(
                 for key, name in SENSITIVE_AREAS.items()
                 if (aggregated.get(key) or 0.0) > CERTAINLY_NOT
             ]
-            dim_reasons.append({"code": "sensitive_area", "areas": areas, "value": value})
+            # Only claim it outright when the row does too; below that the row
+            # says "not confident either way" and so must this line.
+            dim_reasons.append({
+                "code": "sensitive_area",
+                "areas": areas,
+                "value": value,
+                "confident": value > CERTAIN,
+            })
         else:
             dim_reasons.append({"code": "dimension", "dimension": dim, "value": value})
 
@@ -832,8 +839,20 @@ def humanize_reason(reason: dict[str, Any]) -> str:
         if dim == "risk_level":
             _, word, explanation = risk_label(value)
             return f"If this change is wrong the damage is {word.lower()}: {explanation}"
-        question = QUESTION_TEXT.get(dim, dim)
-        return f"{question} -- {as_percent(value)}"
+        # A reason has to be a statement. Echoing the table's question here read
+        # as a second, unanswered prompt, and a reason phrased more confidently
+        # than its own row is the contradiction the red-team called poisonous.
+        statements = {
+            "silent_failure_weighted": "a mistake here might go unnoticed",
+            "worst_case_risk": "the worst case cannot be ruled out",
+            "hidden_scope": "it may change more than its title says",
+            "diff_matches_title": "it may not do what its title says",
+            "sensitive_area": "it may touch money, accounts or personal data",
+        }
+        statement = statements.get(dim)
+        if statement is None:
+            return f"One check did not come back clear ({as_percent(value)})"
+        return f"{statement.capitalize()} ({as_percent(value)})"
     if code == "changes_more_than_title":
         return (
             "It changes more than its title says: "
@@ -843,7 +862,9 @@ def humanize_reason(reason: dict[str, Any]) -> str:
     if code == "sensitive_area":
         areas = reason.get("areas") or []
         listed = ", ".join(areas) if areas else "money, accounts or personal data"
-        return f"It touches {listed}"
+        confident = reason.get("confident", True)
+        verb = "It touches" if confident else "It may touch"
+        return f"{verb} {listed}"
     if code == "tests_missing_but_expected":
         return "It comes with no tests, and a change like this would normally have them"
     if code == "all_clear":

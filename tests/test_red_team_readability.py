@@ -319,3 +319,34 @@ def test_worst_case_risk_is_a_gate_but_not_a_second_risk_row():
     assert readable.count("how bad is it") == 1
     assert "worst case" not in readable
     assert "worst_case_risk" in technical
+
+
+def test_a_reason_never_claims_more_confidence_than_its_row():
+    """The Why block said "It touches accounts" while the table said unsure."""
+    unsure = J.humanize_reason({"code": "sensitive_area", "areas": ["accounts"],
+                                "value": 0.72, "confident": False})
+    certain = J.humanize_reason({"code": "sensitive_area", "areas": ["accounts"],
+                                 "value": 0.95, "confident": True})
+    assert unsure == "It may touch accounts"
+    assert certain == "It touches accounts"
+
+
+def test_reasons_are_statements_not_questions():
+    for dim in ("silent_failure_weighted", "worst_case_risk", "hidden_scope", "diff_matches_title"):
+        text = J.humanize_reason({"code": "dimension", "dimension": dim, "value": 0.42})
+        assert "?" not in text, (dim, text)
+        assert text[0].isupper()
+
+
+def test_the_why_block_and_the_table_agree_on_sensitive_areas():
+    body = J.render_comment(
+        verdict="escalate",
+        reasons=[{"code": "sensitive_area", "areas": ["accounts"], "value": 0.72, "confident": False}],
+        aggregated={"risk_level": 1.0, "sensitive_area": 0.72, "touches_accounts": 0.72,
+                    "diff_matches_title": 0.95, "hidden_scope": 0.02, "silent_failure_weighted": 0.05},
+        total_input_tokens=1,
+        files_reviewed=1,
+    )
+    readable = body.split("<details>")[0]
+    assert "It may touch accounts" in readable
+    assert "Not confident either way" in readable
