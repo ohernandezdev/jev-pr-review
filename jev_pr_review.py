@@ -242,7 +242,9 @@ def evaluate_hard_gates(
             f"changed lines ({total_lines_changed}) exceed max_lines ({max_lines})"
         )
 
-    if ci_status.strip().lower() not in {"all checks passing", "success", "passing"}:
+    if ci_status == "unreadable":
+        reasons.append("CI state could not be read -- grant the workflow `checks: read`")
+    elif ci_status.strip().lower() not in {"all checks passing", "success", "passing"}:
         reasons.append(f"CI is not green (ci_status={ci_status!r})")
 
     return reasons
@@ -455,12 +457,25 @@ def compute_ci_status(check_runs: list[dict[str, Any]], *, own_run_id: str = "")
     return "success"
 
 
+class CheckRunsUnreadable(Exception):
+    """The check-runs endpoint could not be read, so CI state is unknown."""
+
+
 def fetch_check_runs(repo: str, sha: str, token: Optional[str]) -> list[dict[str, Any]]:
-    """Check runs for a commit. An unreadable list is treated as no checks."""
+    """Check runs for a commit.
+
+    An unreadable list is NOT an empty list. Swallowing the error here once
+    turned a missing `checks: read` permission into a confident "no checks",
+    which looks exactly like a repository that has no CI. The caller has to be
+    able to tell those apart, so the failure is raised.
+    """
     try:
         payload = _github_request(f"/repos/{repo}/commits/{sha}/check-runs", token)
-    except Exception:
-        return []
+    except Exception as exc:
+        raise CheckRunsUnreadable(
+            f"cannot read check runs for {sha[:7]} ({exc}) -- "
+            "the workflow may be missing `checks: read` permission"
+        ) from exc
     return payload.get("check_runs", []) or []
 
 
@@ -488,11 +503,18 @@ def await_ci_status(
     """
     if not sha:
         return "no checks"
+    def snapshot() -> str:
+        try:
+            runs = fetch_check_runs(repo, sha, token)
+        except CheckRunsUnreadable:
+            return "unreadable"
+        return compute_ci_status(runs, own_run_id=own_run_id)
+
     deadline = now_fn() + timeout_s
-    status = compute_ci_status(fetch_check_runs(repo, sha, token), own_run_id=own_run_id)
+    status = snapshot()
     while status in {"pending", "no checks"} and now_fn() < deadline:
         sleep_fn(poll_s)
-        status = compute_ci_status(fetch_check_runs(repo, sha, token), own_run_id=own_run_id)
+        status = snapshot()
     return status
 
 

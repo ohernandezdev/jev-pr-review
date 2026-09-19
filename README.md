@@ -30,8 +30,9 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  pull-requests: write
   contents: read
+  checks: read
+  pull-requests: write
 
 jobs:
   review:

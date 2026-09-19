@@ -100,3 +100,27 @@ def test_await_gives_up_at_the_deadline():
 
 def test_await_without_a_sha_reports_no_checks():
     assert J.await_ci_status("o/r", "", None) == "no checks"
+
+
+def test_unreadable_check_runs_are_not_silently_empty():
+    """A 403 must not look like a repository with no CI."""
+
+    def boom(repo, sha, token):
+        raise J.CheckRunsUnreadable("403 Forbidden -- missing `checks: read`")
+
+    original, J.fetch_check_runs = J.fetch_check_runs, boom
+    try:
+        assert J.await_ci_status("o/r", "abc", None, sleep_fn=lambda _: None) == "unreadable"
+    finally:
+        J.fetch_check_runs = original
+
+
+def test_unreadable_blocks_with_an_actionable_reason():
+    reasons = J.evaluate_hard_gates(
+        files_changed=["README.md"],
+        total_lines_changed=2,
+        ci_status="unreadable",
+        blocked_paths=[],
+        max_lines=400,
+    )
+    assert any("checks: read" in r for r in reasons), reasons
