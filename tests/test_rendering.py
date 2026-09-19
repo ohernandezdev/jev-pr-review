@@ -27,7 +27,7 @@ def render(verdict="escalate", reasons=None, scores=None):
 def test_probabilities_are_shown_as_percentages():
     body = render()
     readable = body.split("<details>")[0]
-    assert "95%" in readable and "77%" in readable and "84%" in readable
+    assert "95%" in readable and "77%" in readable and "32%" in readable
     assert not re.search(r"\b0\.\d\d\b", readable), "no bare decimals above the fold"
 
 
@@ -46,7 +46,7 @@ def test_every_question_is_a_sentence_not_a_field_name():
     readable = render().split("<details>")[0]
     for field in ("risk_level", "hidden_scope", "silent_failure_weighted", "diff_matches_title"):
         assert field not in readable, f"{field} leaked into the readable part"
-    assert "Does the change do what its title says?" in readable
+    assert "Does the title describe the whole change?" in readable
 
 
 def test_risk_is_a_word_not_a_number_out_of_three():
@@ -64,17 +64,16 @@ def test_risk_bands_cover_the_whole_range():
 
 def test_answer_labels_read_in_the_direction_that_matters():
     # A high "does it match its title" is reassuring; a high "hidden scope" is not.
-    assert J.answer_label("diff_matches_title", 0.95)[1] == "Almost certainly yes"
+    assert J.answer_label("diff_matches_title", 0.95)[1] == "Yes"
     assert J.answer_label("diff_matches_title", 0.95)[0] == J.answer_label("hidden_scope", 0.05)[0]
     assert J.answer_label("hidden_scope", 0.95)[0] != J.answer_label("diff_matches_title", 0.95)[0]
 
 
 def test_wording_carries_the_direction_so_the_number_only_confirms_it():
     """"No -- 32% sure" reads as doubt about the No. The wording must say it."""
-    assert J.answer_label("hidden_scope", 0.32)[1] == "Probably not"
-    assert J.answer_label("hidden_scope", 0.05)[1] == "Almost certainly not"
-    assert J.answer_label("hidden_scope", 0.55)[1] == "Unclear"
-    assert J.answer_label("hidden_scope", 0.75)[1] == "Probably yes"
+    assert J.answer_label("hidden_scope", 0.05)[1] == "No"
+    assert J.answer_label("hidden_scope", 0.95)[1] == "Yes"
+    assert J.answer_label("hidden_scope", 0.32)[1] == J.UNSURE
     table = [l for l in render().splitlines() if l.startswith("| ") and "?" in l]
     assert table and all("sure" not in row for row in table)
 

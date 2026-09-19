@@ -94,6 +94,48 @@ QUESTIONS: dict[str, dict[str, Any]] = {
             "false": "a defect here would likely surface immediately and loudly",
         },
     },
+    # Red-team finding: one aggregate "does it touch logins, payments or data"
+    # mixes three different kinds of trouble. If the answer is not a flat no,
+    # the reader needs to know WHICH, so each one is its own question.
+    "touches_money": {
+        "type": "noul",
+        "instructions": (
+            "A file's diff and the PR title/body describing the intended "
+            "change are given below. Judge whether this change affects how "
+            "money moves: charges, payments, refunds, invoicing, pricing, "
+            "or account balances."
+        ),
+        "criteria": {
+            "true": "the change affects charging, payments, billing, pricing, or balances",
+            "false": "the change has nothing to do with money",
+        },
+    },
+    "touches_accounts": {
+        "type": "noul",
+        "instructions": (
+            "A file's diff and the PR title/body describing the intended "
+            "change are given below. Judge whether this change affects who "
+            "can get in and what they can reach: sign-in, passwords, tokens, "
+            "sessions, permissions, or who is allowed to see what."
+        ),
+        "criteria": {
+            "true": "the change affects sign-in, credentials, tokens, permissions, or visibility rules",
+            "false": "the change has nothing to do with accounts or access",
+        },
+    },
+    "touches_personal_data": {
+        "type": "noul",
+        "instructions": (
+            "A file's diff and the PR title/body describing the intended "
+            "change are given below. Judge whether this change affects "
+            "customers' personal data: how it is stored, exported, deleted, "
+            "or exposed to anyone."
+        ),
+        "criteria": {
+            "true": "the change affects storage, export, deletion, or exposure of personal data",
+            "false": "the change does not involve customers' personal data",
+        },
+    },
     "tests_expected": {
         "type": "noul",
         "instructions": (
@@ -170,6 +212,21 @@ def build_file_state(
 # Highest level index of the `risk_level` score, used to normalise it to 0..1.
 RISK_LEVEL_MAX = len(QUESTIONS["risk_level"]["criteria"]) - 1
 
+# The three separate sensitive areas, and the short words used to name them to
+# a reader. `sensitive_area` is their max, and is what the gate threshold sees.
+SENSITIVE_AREAS = {
+    "touches_money": "money",
+    "touches_accounts": "accounts",
+    "touches_personal_data": "personal data",
+}
+
+# Above this a probability is treated as a settled "yes", below its complement
+# as a settled "no". Red-team rule: anything in between is a shrug, and a shrug
+# never gets a green tick -- a 38% with a check mark is what broke trust in the
+# table in the first place.
+CERTAIN = 0.90
+CERTAINLY_NOT = 0.10
+
 
 def aggregate_max(per_file_answers: list[dict[str, Any]]) -> dict[str, float]:
     """Aggregate per-file Jev answers into one score per dimension via max.
@@ -229,6 +286,9 @@ def derive_dimensions(per_file: dict[str, float]) -> dict[str, float]:
     silent = per_file.get("silent_failure")
     if risk is not None and silent is not None:
         out["silent_failure_weighted"] = silent * (risk / RISK_LEVEL_MAX)
+    present = [per_file[d] for d in SENSITIVE_AREAS if per_file.get(d) is not None]
+    if present:
+        out["sensitive_area"] = max(present)
     return out
 
 
@@ -301,11 +361,17 @@ def decide_verdict(
     ci_status: str,
     config: dict[str, Any],
     network_failure: bool = False,
+    has_test_changes: Optional[bool] = None,
 ) -> tuple[str, list[str]]:
     """Compute the final verdict and its reasons.
 
     Fail-safe: any network failure after retries forces `escalate`, never
     `automerge`, regardless of everything else.
+
+    Hard gates and dimensions are BOTH always evaluated, and all their reasons
+    are returned together. Returning early on a gate made the scored table
+    decorative -- the verdict's colour then depended only on file size and file
+    name, which trains a reader to ignore the table.
     """
     if network_failure:
         return "escalate", [{"code": "review_unreachable"}]
@@ -317,28 +383,49 @@ def decide_verdict(
         blocked_paths=config.get("blocked_paths", []),
         max_lines=config.get("automerge_when", {}).get("max_lines", 400),
     )
-    if gate_reasons:
-        return "escalate", gate_reasons
-
     thresholds = config.get("automerge_when", {})
-    reasons: list[str] = []
+    dim_reasons: list[dict[str, Any]] = []
     dimension_thresholds = {
         "risk_level": thresholds.get("max_risk_level"),
         "hidden_scope": thresholds.get("hidden_scope"),
         "silent_failure_weighted": thresholds.get("silent_failure_weighted"),
         "worst_case_risk": thresholds.get("worst_case_risk"),
         "diff_matches_title": thresholds.get("diff_matches_title"),
+        "sensitive_area": thresholds.get("sensitive_area"),
     }
     for dim, expr in dimension_thresholds.items():
         if expr is None:
             continue
         value = aggregated.get(dim)
         if value is None:
-            reasons.append({"code": "no_score", "dimension": dim})
+            dim_reasons.append({"code": "no_score", "dimension": dim})
             continue
-        if not check_threshold(value, expr):
-            reasons.append({"code": "dimension", "dimension": dim, "value": value})
+        if check_threshold(value, expr):
+            continue
+        if dim == "sensitive_area":
+            # Name the areas rather than the aggregate: "it touches money" and
+            # "it touches personal data" are not the same warning.
+            areas = [
+                name
+                for key, name in SENSITIVE_AREAS.items()
+                if (aggregated.get(key) or 0.0) > CERTAINLY_NOT
+            ]
+            dim_reasons.append({"code": "sensitive_area", "areas": areas, "value": value})
+        else:
+            dim_reasons.append({"code": "dimension", "dimension": dim, "value": value})
 
+    if has_test_changes is False and (aggregated.get("tests_expected") or 0.0) > CERTAIN:
+        dim_reasons.append({"code": "tests_missing_but_expected"})
+
+    # "It changes more than its title says" is the finding a non-engineer acts
+    # on first, so it leads the list instead of sitting in table-row order.
+    lead: list[dict[str, Any]] = []
+    for i, reason in enumerate(dim_reasons):
+        if reason.get("dimension") == "hidden_scope" and reason["value"] > CERTAIN:
+            lead.append({"code": "changes_more_than_title", "value": dim_reasons.pop(i)["value"]})
+            break
+
+    reasons = lead + gate_reasons + dim_reasons
     if reasons:
         return "escalate", reasons
     return "automerge", [{"code": "all_clear"}]
@@ -587,10 +674,19 @@ def upsert_comment(repo: str, pr_number: int, token: str, body: str) -> None:
 LINE_SEP = chr(10)
 
 QUESTION_TEXT = {
+    # One row, not two: "does it do what the title says" and "does it also do
+    # something the title doesn't mention" read to a non-engineer as the same
+    # question asked twice. Both are still asked of Jev -- only the row merged.
+    "title_scope": "Does the title describe the whole change?",
+    "silent_failure_weighted": "Could a mistake here break things quietly?",
+    "sensitive_area": "Does it touch money, accounts or personal data?",
+    "has_tests": "Does it include tests?",
+    # Used when a dimension has to be named in a reason sentence.
     "diff_matches_title": "Does the change do what its title says?",
     "hidden_scope": "Does it also change things its title doesn't mention?",
-    "silent_failure_weighted": "Could a mistake here break things quietly?",
-    "worst_case_risk": "How likely is it that this touches logins, payments or data?",
+    # Not "does it touch logins, payments or data" any more -- that is now its
+    # own row, asked directly. This one is the tail of the risk distribution.
+    "worst_case_risk": "If it is wrong, how likely is the worst case?",
     "tests_expected": "Would a reviewer expect tests with this?",
 }
 
@@ -600,6 +696,7 @@ HIGH_IS_GOOD = {
     "hidden_scope": False,
     "silent_failure_weighted": False,
     "worst_case_risk": False,
+    "sensitive_area": False,
     "tests_expected": False,
 }
 
@@ -625,31 +722,77 @@ def risk_label(score: float) -> tuple[str, str, str]:
 
 
 # A percentage alone reads as "how sure are you of that answer", which is not
-# what it means. The wording carries the direction so the number only has to
-# confirm it.
-ANSWER_BANDS = [
-    (0.10, "Almost certainly not", False),
-    (0.40, "Probably not", False),
-    (0.70, "Unclear", None),
-    (0.90, "Probably yes", True),
-    (1.01, "Almost certainly yes", True),
-]
+# what it means, so the wording carries the direction. There are exactly three
+# bands and the middle one says so out loud: "Probably not (38%)" next to a
+# green tick reads as an all-clear, which a 38% is not. A shrug has to look
+# like a shrug.
+UNSURE = "Not confident either way"
 
 
 def answer_label(dimension: str, value: float) -> tuple[str, str]:
-    """(icon, wording) for a probability, read in the direction that matters."""
-    for ceiling, wording, says_yes in ANSWER_BANDS:
-        if value < ceiling:
-            break
-    else:  # pragma: no cover
-        raise AssertionError("unreachable")
+    """(icon, wording) for a probability, read in the direction that matters.
 
-    if says_yes is None:
-        return "⚠️", wording
+    A green tick needs both a reassuring direction AND certainty: nothing
+    between 10% and 90% is ever ticked.
+    """
+    if value < CERTAINLY_NOT:
+        wording, says_yes = "No", False
+    elif value > CERTAIN:
+        wording, says_yes = "Yes", True
+    else:
+        return "⚠️", UNSURE
+
     high_is_good = HIGH_IS_GOOD.get(dimension, True)
     reassuring = says_yes == high_is_good
     icon = "✅" if reassuring else "⚠️"
     return icon, wording
+
+
+CHANGES_MORE_THAN_TITLE = "No -- it changes more than it says"
+
+
+def title_scope_label(
+    diff_matches_title: Optional[float], hidden_scope: Optional[float]
+) -> tuple[str, str]:
+    """(icon, wording) for the merged title row.
+
+    Yes only when the change does what the title says AND adds nothing the
+    title omits. A confident "it does more than it says" is the loud case.
+    """
+    matches = diff_matches_title if diff_matches_title is not None else 0.0
+    hidden = hidden_scope if hidden_scope is not None else 1.0
+    if matches > CERTAIN and hidden < CERTAINLY_NOT:
+        return "✅", "Yes"
+    if hidden > CERTAIN:
+        return "⚠️", CHANGES_MORE_THAN_TITLE
+    return "⚠️", UNSURE
+
+
+def tests_label(has_tests: bool, tests_expected: Optional[float]) -> tuple[str, str]:
+    """(icon, wording) for the tests row.
+
+    Whether tests are present is a fact we already computed, so the row states
+    it. `tests_expected` is an opinion, and only qualifies the "no".
+    """
+    if has_tests:
+        return "✅", "Yes"
+    if tests_expected is not None and tests_expected > CERTAIN:
+        return "⚠️", "No -- and a reviewer would expect them"
+    return "⚠️", "No"
+
+
+def sensitive_label(aggregated: dict[str, float]) -> tuple[str, str]:
+    """(icon, wording) for the money/accounts/personal-data row."""
+    values = {k: aggregated.get(k) for k in SENSITIVE_AREAS}
+    present = [v for v in values.values() if v is not None]
+    if not present:
+        return "⚠️", UNSURE
+    hits = [name for key, name in SENSITIVE_AREAS.items() if (values[key] or 0.0) > CERTAIN]
+    if hits:
+        return "⚠️", f"Yes -- {', '.join(hits)}"
+    if all(v < CERTAINLY_NOT for v in present):
+        return "✅", "No"
+    return "⚠️", UNSURE
 
 
 def humanize_reason(reason: dict[str, Any]) -> str:
@@ -691,9 +834,23 @@ def humanize_reason(reason: dict[str, Any]) -> str:
             return f"If this change is wrong the damage is {word.lower()}: {explanation}"
         question = QUESTION_TEXT.get(dim, dim)
         return f"{question} -- {as_percent(value)}"
+    if code == "changes_more_than_title":
+        return (
+            "It changes more than its title says: "
+            f"{as_percent(reason['value'])} likely there is an extra change "
+            "riding along with the described one"
+        )
+    if code == "sensitive_area":
+        areas = reason.get("areas") or []
+        listed = ", ".join(areas) if areas else "money, accounts or personal data"
+        return f"It touches {listed}"
+    if code == "tests_missing_but_expected":
+        return "It comes with no tests, and a change like this would normally have them"
     if code == "all_clear":
         return "Every check came back clear"
-    return str(reason)
+    # A code with no sentence is a bug, but the person reading this did not
+    # write it and must not be shown a dict. Say the honest thing instead.
+    return "Something the review flagged could not be explained here -- see the technical detail"
 
 
 def render_comment(
@@ -703,6 +860,12 @@ def render_comment(
     aggregated: dict[str, float],
     total_input_tokens: int,
     files_reviewed: int = 0,
+    pr_title: str = "",
+    pr_author: str = "",
+    files_changed: Optional[int] = None,
+    lines_changed: Optional[int] = None,
+    has_test_changes: Optional[bool] = None,
+    escalate_to: str = "",
 ) -> str:
     cost_usd = total_input_tokens * COST_PER_MILLION_INPUT_TOKENS / 1_000_000
 
@@ -710,12 +873,36 @@ def render_comment(
         headline = "🟢 **This looks safe to merge without a review**"
     else:
         headline = "🔴 **Someone should look at this before it is merged**"
+        # A warning with no addressee is a warning nobody owns.
+        if escalate_to:
+            headline += f" -- assigned to: {escalate_to}"
 
     lines = ["## Review summary", "", headline, ""]
 
+    # Nobody can sign off on a change they cannot identify, so the comment says
+    # which change it is before it says anything about it.
+    facts = []
+    if pr_author:
+        facts.append(f"by {pr_author}")
+    if files_changed is not None:
+        facts.append(f"{files_changed} file{'' if files_changed == 1 else 's'} changed")
+    if lines_changed is not None:
+        facts.append(f"{lines_changed} line{'' if lines_changed == 1 else 's'} changed")
+    if pr_title or facts:
+        if pr_title:
+            lines.append(f"> **{pr_title}**")
+        if facts:
+            lines.append(f"> {' · '.join(facts)}")
+        lines.append("")
+
     if verdict != "automerge" or reasons:
+        # The title question renders as one row, so it is one line in "Why"
+        # too: the lead already says the change does more than its title.
+        shown = reasons
+        if any(r.get("code") == "changes_more_than_title" for r in reasons):
+            shown = [r for r in reasons if r.get("dimension") != "diff_matches_title"]
         lines.append("**Why**")
-        lines += [f"- {humanize_reason(r)}" for r in reasons]
+        lines += [f"- {humanize_reason(r)}" for r in shown]
         lines.append("")
 
     lines += [
@@ -730,13 +917,38 @@ def render_comment(
         icon, word, explanation = risk_label(risk)
         lines.append(f"| If this change is wrong, how bad is it? | {icon} **{word}** -- {explanation} |")
 
-    for dim in ("worst_case_risk", "diff_matches_title", "hidden_scope",
-                "silent_failure_weighted", "tests_expected"):
+    matches, hidden = aggregated.get("diff_matches_title"), aggregated.get("hidden_scope")
+    if matches is not None or hidden is not None:
+        icon, word = title_scope_label(matches, hidden)
+        parts = []
+        if matches is not None:
+            parts.append(f"does what it says {as_percent(matches)}")
+        if hidden is not None:
+            parts.append(f"extra changes {as_percent(hidden)}")
+        lines.append(
+            f"| {QUESTION_TEXT['title_scope']} | {icon} **{word}** ({', '.join(parts)}) |"
+        )
+
+    sensitive = aggregated.get("sensitive_area")
+    if sensitive is not None:
+        icon, word = sensitive_label(aggregated)
+        lines.append(
+            f"| {QUESTION_TEXT['sensitive_area']} | {icon} **{word}** ({as_percent(sensitive)}) |"
+        )
+
+    # worst_case_risk stays a gate and a raw score, but not a row: "how bad is
+    # it" and "how likely is the worst case" read as the same question asked
+    # twice, which is the duplication the red-team called out on the title rows.
+    for dim in ("silent_failure_weighted",):
         value = aggregated.get(dim)
         if value is None:
             continue
         icon, word = answer_label(dim, value)
         lines.append(f"| {QUESTION_TEXT[dim]} | {icon} **{word}** ({as_percent(value)}) |")
+
+    if has_test_changes is not None:
+        icon, word = tests_label(has_test_changes, aggregated.get("tests_expected"))
+        lines.append(f"| {QUESTION_TEXT['has_tests']} | {icon} **{word}** |")
 
     cost_text = "less than a cent" if cost_usd < 0.01 else f"${cost_usd:.2f}"
     lines += [
@@ -750,17 +962,21 @@ def render_comment(
         "|---|---|",
     ]
     for dim in ("risk_level", "worst_case_risk", "diff_matches_title", "hidden_scope",
-                "silent_failure", "silent_failure_weighted", "tests_expected"):
+                "silent_failure", "silent_failure_weighted", "tests_expected",
+                "touches_money", "touches_accounts", "touches_personal_data",
+                "sensitive_area"):
         value = aggregated.get(dim)
         suffix = " / 3" if dim == "risk_level" else ""
         lines.append(f"| `{dim}` | {value:.2f}{suffix} |" if value is not None else f"| `{dim}` | n/a |")
     lines += [
         "",
-        f"`{total_input_tokens}` input tokens, ${cost_usd:.6f}",
+        # Moved in from the footer: a cost quoted next to the verdict reads as
+        # "this was cheap, therefore it was shallow".
+        f"`{total_input_tokens}` input tokens · cost of this run: {cost_text} (${cost_usd:.6f})",
         "",
         "</details>",
         "",
-        f"_{files_reviewed} file{'' if files_reviewed == 1 else 's'} reviewed · cost of this run: {cost_text}._",
+        f"_{files_reviewed} file{'' if files_reviewed == 1 else 's'} reviewed._",
     ]
     return LINE_SEP.join(lines)
 
@@ -963,6 +1179,7 @@ def review_pr(
         ci_status=ci_status,
         config=config,
         network_failure=network_failure,
+        has_test_changes=has_test_changes,
     )
 
     if not dry_run:
@@ -972,6 +1189,12 @@ def review_pr(
             aggregated=aggregated,
             total_input_tokens=total_input_tokens,
             files_reviewed=len(reviewable),
+            pr_title=pr_title,
+            pr_author=f"@{(pr.get('user') or {}).get('login', '')}" if (pr.get("user") or {}).get("login") else "",
+            files_changed=len(files_changed),
+            lines_changed=total_lines_changed,
+            has_test_changes=has_test_changes,
+            escalate_to=config.get("escalate_to", "") or "",
         )
         upsert_comment(repo, pr_number, github_token, comment_body)
 

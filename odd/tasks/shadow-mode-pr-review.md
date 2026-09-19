@@ -196,3 +196,72 @@ probabilidad en el peor nivel, umbral `< 0.15`), que además usa las `probabilit
 que estábamos tirando. Distribución ausente ≠ 0: sin dato, el gate escala.
 
 68 tests en verde.
+
+## Red-team con lectora no técnica
+
+El comentario se pasó por una lectora que no es ingeniera (jefa de operaciones), la
+persona a la que de verdad se le pediría firmar. Ocho hallazgos, todos aceptados
+salvo uno.
+
+1. **La tabla no participaba en el veredicto.** `decide_verdict` hacía
+   `if gate_reasons: return "escalate", gate_reasons`, así que al saltar un gate duro
+   las dimensiones no se evaluaban nunca — pero la tabla se pintaba igual. Su frase:
+   "me está entrenando a ignorar la tabla; el color solo depende del tamaño y del
+   nombre del fichero". El más grave de los ocho. Ahora gates y dimensiones se evalúan
+   SIEMPRE y se devuelven todas las razones juntas. Test:
+   `test_a_hard_gate_does_not_hide_the_dimensions_that_also_failed` y
+   `test_a_red_verdict_can_be_driven_by_the_table_alone`.
+2. **El tick verde sobre un 38%.** `✅ Probably not (38%)` es indefendible. Tres
+   bandas y nada más: `<0.10` → `No`, `0.10–0.90` → `Not confident either way`,
+   `>0.90` → `Yes`. El ✅ exige dirección tranquilizadora Y certeza, así que nada de
+   la banda media lleva visto bueno. Fuera "Probably yes/not": el encogimiento de
+   hombros tiene que verse como tal.
+3. **Dos filas para una sola pregunta.** `Does the change do what its title says?` y
+   `Does it also change things its title doesn't mention?` se leían como la misma
+   pregunta repetida. Fusionadas en *Does the title describe the whole change?*. Las
+   dos dimensiones se siguen preguntando a Jev, siguen en los raw scores y siguen
+   teniendo umbral propio: lo que cambió es solo la presentación. Además, cuando la
+   respuesta es `No -- it changes more than it says` ese hallazgo sube a la PRIMERA
+   línea de **Why** (razón `changes_more_than_title`): era el más grave del comentario
+   y estaba enterrado en la fila 4.
+4. **Preguntábamos una opinión teniendo el hecho.** `Would a reviewer expect tests
+   with this?` es una expectativa; ella: "dime si hay tests o no hay". Y
+   `has_test_changes` ya existía en `review_pr`. La fila pasa a *Does it include
+   tests?* → `Yes`/`No` alimentada por ese booleano. `tests_expected` se mantiene en
+   los raw scores y solo matiza: `> 0.90` sin tests → `No -- and a reviewer would
+   expect them`, y esa combinación entra como razón en "Why".
+5. **Tres riesgos distintos en un porcentaje agregado.** "que toque el login no es lo
+   mismo que toque pagos, ni que toque datos personales; si no es un no rotundo quiero
+   saber CUÁL". Tres preguntas `noul` nuevas — `touches_money`, `touches_accounts`,
+   `touches_personal_data` — redactadas describiendo la situación, nunca la decisión.
+   Agregadas por `max`, y su máximo es `sensitive_area`, con gate `< 0.10` en
+   `.jev-review.yml`. La fila nombra las que aplican: `Yes -- money, personal data`.
+6. **"No firmo lo que no sé qué es".** Ambos comentarios, incluido el verde, llevan
+   bajo el titular título del PR, autor (`user.login`), ficheros y líneas cambiadas,
+   sacados de la respuesta de la API que ya pedíamos. Si no hay dato, no se inventa.
+7. **Un aviso sin destinatario no ocurre.** Config opcional `escalate_to`; si está, el
+   titular rojo acaba en ` -- assigned to: @quien`. Si no está, no se inventa a nadie,
+   y el titular verde nunca lo lleva.
+8. **El coste.** "Me sugiere que esto es barato y por tanto flojo". `cost of this run`
+   se movió dentro del `<details>` plegado; fuera queda solo el recuento de ficheros.
+
+**Lo que NO se cambió: los porcentajes.** Ella quería quitarlos; se quedan por
+decisión explícita del dueño del repo. Etiqueta + `(NN%)`.
+
+**Lección transversal:** el red-team que sirve no es el que busca bugs en el código,
+es el que lee la salida como la leería quien tiene que actuar. Un tick verde sobre un
+38% y una tabla decorativa pasan cualquier test unitario y destruyen la confianza en
+la herramienta a la primera lectura.
+
+96 tests en verde (68 anteriores + 28 nuevos de `tests/test_red_team_readability.py`).
+
+### Dos correcciones sobre el trabajo del red-team
+
+- **`worst_case_risk` dejó de ser fila.** "How bad is it" y "how likely is the worst case"
+  se leían como la misma pregunta dos veces: el pecado que el propio red-team señaló en
+  las filas del título, reintroducido al arreglarlas. Sigue siendo gate y raw score.
+- **Un código de razón sin frase pintaba el diccionario crudo** en un comentario que lee
+  una persona. Ahora hay un texto de reserva honesto y un test que lee el propio fuente
+  del módulo y exige una frase para cada código que se genera en él.
+
+99 tests en verde.

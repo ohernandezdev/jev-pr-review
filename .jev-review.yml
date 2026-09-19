@@ -17,7 +17,14 @@ automerge_when:
   # the tail directly -- how much probability sits on the worst level.
   worst_case_risk: "< 0.15"
   diff_matches_title: "> 0.80"
+  # Applied to the max of touches_money / touches_accounts /
+  # touches_personal_data -- three separate questions, one gate.
+  sensitive_area: "< 0.10"
   max_lines: 400
+
+# Optional. When set, the escalate headline names who should look at the PR.
+# Left unset, no addressee is invented.
+# escalate_to: "@platform-team"
 
 blocked_paths:
   - ".github/**"
