@@ -74,7 +74,7 @@ el diff por la API de GitHub. Permisos mínimos: `pull-requests: write`, `conten
 - [x] T2 `action.yml` + `.jev-review.yml` de ejemplo + README
 - [x] T3 Tests: unitarios de agregación/gates con fixtures, y un E2E real contra la API que verifique que un diff de auth puntúa alto y uno de README puntúa bajo
 - [x] T4 Workflow consumidor en jevmod (`.github/workflows/jev-review.yml`), modo sombra
-- [ ] T5 Correr el E2E, abrir un PR de prueba en jevmod y mirar el comentario real
+- [x] T5 Correr el E2E, abrir un PR de prueba en jevmod y mirar el comentario real
 
 ## Criterio de aceptación
 
@@ -136,3 +136,28 @@ del max entre ficheros, y el orden queda: README 0.00 < auth 0.20 < retry 0.44 <
 Los 32 tests iniciales pasaban sin cubrir esto: al quitar la clave de sus configs, el
 código la saltaba en silencio. Añadidos 5 tests (`tests/test_weighted_silent_failure.py`),
 uno de ellos E2E real. **37 passed.**
+
+## Lo que encontró el primer PR real (2026-09-19)
+
+PR #1 de `jev-pr-review`, dogfooding sobre sí mismo. Dos hallazgos:
+
+**Acierto del modelo.** El PR se tituló `docs: use the real action reference` y
+acabó llevando también el fix de CI y un workflow nuevo. `hidden_scope` subió a
+**0.96** y `tests_expected` a 0.80. La dimensión hace exactamente lo que promete:
+detectó que el diff hacía bastante más de lo que anunciaba el título. No se lo
+enseñé, salió solo.
+
+**Defecto propio, en dos capas.** El veredicto escaló por `ci_status`, no por
+las dimensiones:
+1. Usaba `mergeable_state`, que valía `unstable` porque el propio revisor era un
+   check en marcha. Se bloqueaba a sí mismo por existir. Ahora lee los check-runs
+   del head SHA y descarta el suyo por `GITHUB_RUN_ID`.
+2. Arreglado eso, arrancaba a la vez que los demás workflows y veía `no checks`
+   por carrera. Espera acotada de 5 min.
+
+La conclusión de diseño: **el revisor no debe ser quien decide que el CI está
+verde.** En `enforce` el merge irá por `gh pr merge --auto` y el gate de CI por
+branch protection, que retiene el merge de verdad en vez de fiarse de una foto.
+La espera solo sirve para que los datos de calibración sean honestos.
+
+Coste real observado: $0.000047 y $0.000225 por run.

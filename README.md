@@ -179,3 +179,14 @@ so it is scaled by that file's `risk_level` before any threshold sees it:
 
 The pairing happens per file, before the max across files -- otherwise the README's
 silence would pair with the auth file's risk.
+
+### When enforce mode arrives, it will not merge by itself
+
+The reviewer produces a semantic verdict. It should never be the thing that
+decides CI was green: it is one check among others, it starts alongside them,
+and any snapshot it takes is a race it can lose. The CI gate belongs to branch
+protection, and the merge to `gh pr merge --auto`, which GitHub holds until the
+required checks pass. This action's job ends at the verdict.
+
+The bounded wait in `await_ci_status` exists only so the shadow-mode data
+records what CI actually did, rather than what was true in the first second.
